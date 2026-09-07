@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: secms-db
+    environment:
+      POSTGRES_USER: secms
+      POSTGRES_PASSWORD: secms
+      POSTGRES_DB: secms
+    ports:
+      - "5433:5432"
+    volumes:
+      - secms_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U secms -d secms"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  secms_pgdata:
