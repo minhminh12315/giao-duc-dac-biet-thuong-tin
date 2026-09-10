@@ -112,30 +112,6 @@ function Stop-IisSiteSafe {
     }
 }
 
-function Start-IisSiteSafe {
-    param([string]$Name)
-    if (-not (Test-IisSiteExists -Name $Name)) {
-        Write-Host "  Site '$Name' khong ton tai - bo qua mo." -ForegroundColor Yellow
-        return
-    }
-    $poolName = (Get-Item "IIS:\Sites\$Name").applicationPool
-    if ($poolName) {
-        $pool = Get-WebAppPoolState -Name $poolName -ErrorAction SilentlyContinue
-        if ($pool -and $pool.Value -ne 'Started') {
-            Write-Host "  Dang khoi dong AppPool '$poolName'..."
-            Start-WebAppPool -Name $poolName
-        }
-    }
-    $state = Get-SiteState -Name $Name
-    if ($state -ne 'Started') {
-        Write-Host "  Dang khoi dong site '$Name'..."
-        Start-Website -Name $Name
-    }
-    else {
-        Write-Host "  Site '$Name' da dang chay." -ForegroundColor DarkGray
-    }
-}
-
 function Get-OriginCertificate {
     param([string]$FriendlyName)
     $certs = @(Get-ChildItem -Path 'Cert:\LocalMachine\My' |
@@ -155,10 +131,109 @@ function Ensure-AppPool {
     if (-not (Test-Path "IIS:\AppPools\$Name")) {
         Write-Host "  Tao AppPool '$Name'..."
         New-WebAppPool -Name $Name | Out-Null
-        Set-ItemProperty "IIS:\AppPools\$Name" -Name managedRuntimeVersion -Value $ManagedRuntimeVersion
-        Set-ItemProperty "IIS:\AppPools\$Name" -Name managedPipelineMode -Value 'Integrated'
-        Set-ItemProperty "IIS:\AppPools\$Name" -Name startMode -Value 'AlwaysRunning'
-        Set-ItemProperty "IIS:\AppPools\$Name" -Name enable32BitAppOnWin64 -Value $false
+    }
+    # OnDemand on dinh hon AlwaysRunning (AlwaysRunning can Application Initialization).
+    Set-ItemProperty "IIS:\AppPools\$Name" -Name managedRuntimeVersion -Value $ManagedRuntimeVersion
+    Set-ItemProperty "IIS:\AppPools\$Name" -Name managedPipelineMode -Value 'Integrated'
+    Set-ItemProperty "IIS:\AppPools\$Name" -Name startMode -Value 'OnDemand'
+    Set-ItemProperty "IIS:\AppPools\$Name" -Name enable32BitAppOnWin64 -Value $false
+    Set-ItemProperty "IIS:\AppPools\$Name" -Name processModel.identityType -Value 'ApplicationPoolIdentity'
+    # Tranh khoa pool sau 1-2 lan crash (thuong gap sau deploy).
+    Set-ItemProperty "IIS:\AppPools\$Name" -Name failure.rapidFailProtection -Value $true
+    Set-ItemProperty "IIS:\AppPools\$Name" -Name failure.rapidFailProtectionMaxCrashes -Value 5
+    Set-ItemProperty "IIS:\AppPools\$Name" -Name recycling.periodicRestart.time -Value ([TimeSpan]::FromHours(0))
+}
+
+function Set-DeployAcl {
+    param(
+        [string]$Path,
+        [string]$AppPoolName
+    )
+    if (-not (Test-Path -LiteralPath $Path)) {
+        New-Item -ItemType Directory -Force -Path $Path | Out-Null
+    }
+    $acl = Get-Acl -LiteralPath $Path
+    $rules = @(
+        (New-Object System.Security.AccessControl.FileSystemAccessRule(
+            'IIS_IUSRS', 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')),
+        (New-Object System.Security.AccessControl.FileSystemAccessRule(
+            "IIS AppPool\$AppPoolName", 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+    )
+    # API can ghi logs + App_Data/uploads
+    if ($AppPoolName -like '*API*') {
+        $rules += New-Object System.Security.AccessControl.FileSystemAccessRule(
+            "IIS AppPool\$AppPoolName", 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+    }
+    foreach ($rule in $rules) {
+        $acl.SetAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $Path -AclObject $acl
+    Write-Host "  ACL OK: $Path ($AppPoolName)"
+}
+
+function Ensure-DefaultDocument {
+    param([string]$SiteName)
+    $path = "IIS:\Sites\$SiteName"
+    if (-not (Test-Path $path)) { return }
+    try {
+        $files = Get-WebConfigurationProperty -PSPath $path -Filter 'system.webServer/defaultDocument/files' -Name '.' -ErrorAction Stop
+        $existing = @()
+        if ($files -and $files.Collection) {
+            $existing = @($files.Collection | ForEach-Object { $_.value })
+        }
+        if ($existing -notcontains 'index.html') {
+            Add-WebConfigurationProperty -PSPath $path `
+                -Filter 'system.webServer/defaultDocument/files' `
+                -Name '.' `
+                -Value @{ value = 'index.html' }
+            Write-Host "  Them defaultDocument index.html cho '$SiteName'"
+        }
+    }
+    catch {
+        Write-Host "  Bo qua defaultDocument: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+}
+
+function Start-IisSiteSafe {
+    param([string]$Name)
+    if (-not (Test-IisSiteExists -Name $Name)) {
+        Write-Host "  Site '$Name' khong ton tai - bo qua mo." -ForegroundColor Yellow
+        return
+    }
+    $poolName = (Get-Item "IIS:\Sites\$Name").applicationPool
+    if ($poolName) {
+        # Neu pool bi khoa (503), recycle/start lai.
+        $pool = Get-WebAppPoolState -Name $poolName -ErrorAction SilentlyContinue
+        if ($pool -and $pool.Value -eq 'Stopped') {
+            Write-Host "  Dang khoi dong AppPool '$poolName'..."
+            try {
+                Start-WebAppPool -Name $poolName
+            }
+            catch {
+                Write-Host "  Start pool that bai, thu recycle..." -ForegroundColor Yellow
+                Restart-WebAppPool -Name $poolName -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 1
+                Start-WebAppPool -Name $poolName
+            }
+            Start-Sleep -Seconds 2
+        }
+    }
+    $state = Get-SiteState -Name $Name
+    if ($state -ne 'Started') {
+        Write-Host "  Dang khoi dong site '$Name'..."
+        Start-Website -Name $Name
+        Start-Sleep -Seconds 1
+    }
+    else {
+        Write-Host "  Site '$Name' da dang chay." -ForegroundColor DarkGray
+    }
+
+    $poolState = if ($poolName) { (Get-WebAppPoolState -Name $poolName).Value } else { 'N/A' }
+    $siteState = Get-SiteState -Name $Name
+    Write-Host "  Trang thai: site=$siteState, pool=$poolState"
+    if ($siteState -ne 'Started' -or ($poolName -and $poolState -ne 'Started')) {
+        Write-Host "  CANH BAO: '$Name' chua chay - day la nguyen nhan 503." -ForegroundColor Red
+        Write-Host "  Kiem tra Event Viewer > Windows Logs > Application (IIS / ASP.NET Core)." -ForegroundColor Yellow
     }
 }
 
@@ -173,13 +248,16 @@ function Ensure-SiteWithBindings {
         [string]$ManagedRuntimeVersion = 'NoManagedCode'
     )
 
+    Ensure-AppPool -Name $AppPoolName -ManagedRuntimeVersion $ManagedRuntimeVersion
+    Set-DeployAcl -Path $PhysicalPath -AppPoolName $AppPoolName
+
     if (Test-IisSiteExists -Name $SiteName) {
-        Write-Host "  Site '$SiteName' da co - bo qua tao site/binding." -ForegroundColor DarkGray
+        Write-Host "  Site '$SiteName' da co - cap nhat physicalPath + AppPool." -ForegroundColor DarkGray
         Set-ItemProperty "IIS:\Sites\$SiteName" -Name physicalPath -Value $PhysicalPath
+        Set-ItemProperty "IIS:\Sites\$SiteName" -Name applicationPool -Value $AppPoolName
+        Ensure-DefaultDocument -SiteName $SiteName
         return
     }
-
-    Ensure-AppPool -Name $AppPoolName -ManagedRuntimeVersion $ManagedRuntimeVersion
 
     Write-Host "  Tao site '$SiteName' -> $PhysicalPath"
     New-Website -Name $SiteName `
@@ -205,6 +283,7 @@ function Ensure-SiteWithBindings {
     }
     $httpsBinding.AddSslCertificate($Certificate.Thumbprint, 'My')
     Write-Host "  Da gan cert thumbprint $($Certificate.Thumbprint)" -ForegroundColor Green
+    Ensure-DefaultDocument -SiteName $SiteName
 }
 
 function Publish-Backend {
