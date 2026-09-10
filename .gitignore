@@ -31,6 +31,7 @@ Desktop.ini
 !**/.env.example
 login.json
 **/appsettings.*.local.json
+**/appsettings.json
 **/secrets.json
 *.pfx
 *.p12
