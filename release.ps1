@@ -34,7 +34,8 @@ param(
     [string]$CertFriendlyName = 'hndedu-cloudflare-origin',
     [string]$DotnetConfiguration = 'Release',
     [ValidateSet('win-x64', 'win-x86')]
-    [string]$DotnetRuntime = 'win-x64'
+    [string]$DotnetRuntime = 'win-x64',
+    [switch]$NoPause
 )
 
 $ErrorActionPreference = 'Stop'
@@ -432,63 +433,119 @@ function Test-LocalIisSmoke {
 
 # -------------------- main --------------------
 $startedAt = Get-Date
-Write-Host 'SECMS release pipeline' -ForegroundColor Green
-Write-Host "Repo:   $RepoRoot"
-Write-Host "Deploy: $DeployRoot"
-Write-Host "API:    $ApiHostName  (site $ApiSiteName)"
-Write-Host "UI:     $UiHostName   (site $UiSiteName)"
+$exitCode = 0
+$logDir = Join-Path $RepoRoot 'logs'
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$logFile = Join-Path $logDir ("release-{0:yyyyMMdd-HHmmss}.log" -f $startedAt)
+$errorFile = Join-Path $logDir 'release-last-error.txt'
 
-Ensure-WebAdministration
-Assert-AspNetCoreHostingBundle
-if (-not (Test-UrlRewriteInstalled)) {
-    Write-Host 'CANH BAO: URL Rewrite Module chua cai - SPA deep-link co the 404 (trang chu van mo duoc).' -ForegroundColor Yellow
-    Write-Host '  Tai: https://www.iis.net/downloads/microsoft/url-rewrite' -ForegroundColor Yellow
+try {
+    Start-Transcript -Path $logFile -Force | Out-Null
+}
+catch {
+    Write-Host "Khong start duoc transcript: $($_.Exception.Message)" -ForegroundColor Yellow
 }
 
-$apiProject = Join-Path $RepoRoot 'src\backend\Secms.Api\Secms.Api.csproj'
-$frontendDir = Join-Path $RepoRoot 'src\frontend'
-$apiDeploy = Join-Path $DeployRoot 'api'
-$uiDeploy = Join-Path $DeployRoot 'ui'
-$apiPool = "${ApiSiteName}_Pool"
-$uiPool = "${UiSiteName}_Pool"
+try {
+    Write-Host 'SECMS release pipeline' -ForegroundColor Green
+    Write-Host "Repo:   $RepoRoot"
+    Write-Host "Deploy: $DeployRoot"
+    Write-Host "API:    $ApiHostName  (site $ApiSiteName)"
+    Write-Host "UI:     $UiHostName   (site $UiSiteName)"
+    Write-Host "Log:    $logFile" -ForegroundColor DarkGray
 
-$cert = Get-OriginCertificate -FriendlyName $CertFriendlyName
-Write-Host "Cert: $($cert.FriendlyName) ($($cert.Thumbprint)) het han $($cert.NotAfter.ToString('yyyy-MM-dd'))"
+    Ensure-WebAdministration
+    Assert-AspNetCoreHostingBundle
+    if (-not (Test-UrlRewriteInstalled)) {
+        Write-Host 'CANH BAO: URL Rewrite Module chua cai - SPA deep-link co the 404 (trang chu van mo duoc).' -ForegroundColor Yellow
+        Write-Host '  Tai: https://www.iis.net/downloads/microsoft/url-rewrite' -ForegroundColor Yellow
+    }
 
-Write-Step '1/4 Dung site IIS (neu co) de tranh lock process'
-Stop-IisSiteSafe -Name $ApiSiteName
-Stop-IisSiteSafe -Name $UiSiteName
+    $apiProject = Join-Path $RepoRoot 'src\backend\Secms.Api\Secms.Api.csproj'
+    $frontendDir = Join-Path $RepoRoot 'src\frontend'
+    $apiDeploy = Join-Path $DeployRoot 'api'
+    $uiDeploy = Join-Path $DeployRoot 'ui'
+    $apiPool = "${ApiSiteName}_Pool"
+    $uiPool = "${UiSiteName}_Pool"
 
-Write-Step '2/4 Trien khai Secms.Api (dotnet publish)'
-Publish-Backend -ProjectPath $apiProject -OutputPath $apiDeploy
-Ensure-SiteWithBindings `
-    -SiteName $ApiSiteName `
-    -PhysicalPath $apiDeploy `
-    -HostName $ApiHostName `
-    -AppPoolName $apiPool `
-    -Certificate $cert `
-    -ManagedRuntimeVersion 'NoManagedCode'
+    $cert = Get-OriginCertificate -FriendlyName $CertFriendlyName
+    Write-Host "Cert: $($cert.FriendlyName) ($($cert.Thumbprint)) het han $($cert.NotAfter.ToString('yyyy-MM-dd'))"
 
-Write-Step '3/4 Trien khai Frontend (npm install + build)'
-Publish-Frontend -FrontendPath $frontendDir -OutputPath $uiDeploy
-Ensure-SiteWithBindings `
-    -SiteName $UiSiteName `
-    -PhysicalPath $uiDeploy `
-    -HostName $UiHostName `
-    -AppPoolName $uiPool `
-    -Certificate $cert `
-    -ManagedRuntimeVersion 'NoManagedCode'
+    Write-Step '1/4 Dung site IIS (neu co) de tranh lock process'
+    Stop-IisSiteSafe -Name $ApiSiteName
+    Stop-IisSiteSafe -Name $UiSiteName
 
-Write-Step '4/4 Mo lai site IIS + smoke local'
-Start-IisSiteSafe -Name $ApiSiteName
-Start-IisSiteSafe -Name $UiSiteName
-Start-Sleep -Seconds 2
-Test-LocalIisSmoke -HostName $UiHostName -Path '/'
-Test-LocalIisSmoke -HostName $ApiHostName -Path '/swagger/index.html'
+    Write-Step '2/4 Trien khai Secms.Api (dotnet publish)'
+    Publish-Backend -ProjectPath $apiProject -OutputPath $apiDeploy
+    Ensure-SiteWithBindings `
+        -SiteName $ApiSiteName `
+        -PhysicalPath $apiDeploy `
+        -HostName $ApiHostName `
+        -AppPoolName $apiPool `
+        -Certificate $cert `
+        -ManagedRuntimeVersion 'NoManagedCode'
 
-$elapsed = (Get-Date) - $startedAt
-Write-Host ''
-Write-Host "Hoan tat trong $([int]$elapsed.TotalSeconds)s." -ForegroundColor Green
-Write-Host "  API: https://$ApiHostName/swagger"
-Write-Host "  UI:  https://$UiHostName/"
-Write-Host "  Neu local smoke OK ma domain van 503: kiem tra Cloudflare (SSL Full, proxy orange cloud, IP origin)."
+    Write-Step '3/4 Trien khai Frontend (npm install + build)'
+    Publish-Frontend -FrontendPath $frontendDir -OutputPath $uiDeploy
+    Ensure-SiteWithBindings `
+        -SiteName $UiSiteName `
+        -PhysicalPath $uiDeploy `
+        -HostName $UiHostName `
+        -AppPoolName $uiPool `
+        -Certificate $cert `
+        -ManagedRuntimeVersion 'NoManagedCode'
+
+    Write-Step '4/4 Mo lai site IIS + smoke local'
+    Start-IisSiteSafe -Name $ApiSiteName
+    Start-IisSiteSafe -Name $UiSiteName
+    Start-Sleep -Seconds 2
+    Test-LocalIisSmoke -HostName $UiHostName -Path '/'
+    Test-LocalIisSmoke -HostName $ApiHostName -Path '/swagger/index.html'
+
+    $elapsed = (Get-Date) - $startedAt
+    Write-Host ''
+    Write-Host "Hoan tat trong $([int]$elapsed.TotalSeconds)s." -ForegroundColor Green
+    Write-Host "  API: https://$ApiHostName/swagger"
+    Write-Host "  UI:  https://$UiHostName/"
+    Write-Host "  Neu local smoke OK ma domain van 503: kiem tra Cloudflare (SSL Full, proxy orange cloud, IP origin)."
+}
+catch {
+    $exitCode = 1
+    $errText = @"
+===== RELEASE ERROR $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') =====
+Message: $($_.Exception.Message)
+
+ScriptStackTrace:
+$($_.ScriptStackTrace)
+
+Exception:
+$($_.Exception.ToString())
+
+Position: $($_.InvocationInfo.PositionMessage)
+===== END ERROR =====
+"@
+    Write-Host ''
+    Write-Host $errText -ForegroundColor Red
+    Set-Content -LiteralPath $errorFile -Value $errText -Encoding UTF8
+    Write-Host "Da ghi loi ra: $errorFile" -ForegroundColor Yellow
+    Write-Host "Log day du:   $logFile" -ForegroundColor Yellow
+}
+finally {
+    try { Stop-Transcript | Out-Null } catch { }
+
+    Write-Host ''
+    Write-Host "Log: $logFile"
+    if (Test-Path -LiteralPath $errorFile) {
+        Write-Host "Loi gan nhat: $errorFile"
+        Write-Host 'Ban co the mo file log/error bang notepad de copy, khong can copy tu console.' -ForegroundColor Cyan
+    }
+
+    if (-not $NoPause) {
+        Write-Host ''
+        Read-Host 'Nhan Enter de thoat (cua so se giu nguyen de ban copy log path o tren)'
+    }
+
+    if ($exitCode -ne 0) {
+        exit $exitCode
+    }
+}
