@@ -27,7 +27,7 @@ Desktop.ini
 .env
 .env.*
 !.env.example
-!.env.production
+.env.production
 !**/.env.example
 login.json
 **/appsettings.*.local.json
