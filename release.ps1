@@ -238,6 +238,65 @@ function Start-IisSiteSafe {
     }
 }
 
+function Ensure-SiteBindings {
+    param(
+        [string]$SiteName,
+        [string]$HostName,
+        [System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate
+    )
+
+    $httpInfo = "*:80:$HostName"
+    $httpsInfo = "*:443:$HostName"
+
+    $http = Get-WebBinding -Name $SiteName -Protocol 'http' -ErrorAction SilentlyContinue |
+        Where-Object { $_.bindingInformation -eq $httpInfo }
+    if (-not $http) {
+        Write-Host "  Them binding http://$HostName ..."
+        New-WebBinding -Name $SiteName -Protocol 'http' -Port 80 -HostHeader $HostName
+    }
+    else {
+        Write-Host "  Binding HTTP OK: $httpInfo" -ForegroundColor DarkGray
+    }
+
+    $https = Get-WebBinding -Name $SiteName -Protocol 'https' -ErrorAction SilentlyContinue |
+        Where-Object { $_.bindingInformation -eq $httpsInfo }
+    if (-not $https) {
+        Write-Host "  Them binding https://$HostName (SNI) ..."
+        New-WebBinding -Name $SiteName -Protocol 'https' -Port 443 -HostHeader $HostName -SslFlags 1
+    }
+    else {
+        Write-Host "  Binding HTTPS OK: $httpsInfo" -ForegroundColor DarkGray
+    }
+
+    $httpsBinding = Get-WebBinding -Name $SiteName -Protocol 'https' |
+        Where-Object { $_.bindingInformation -eq $httpsInfo } |
+        Select-Object -First 1
+    if (-not $httpsBinding) {
+        throw "Khong lay duoc HTTPS binding cho site '$SiteName'."
+    }
+    try {
+        $httpsBinding.AddSslCertificate($Certificate.Thumbprint, 'My')
+        Write-Host "  Cert HTTPS: $($Certificate.Thumbprint)" -ForegroundColor Green
+    }
+    catch {
+        # Co the da gan san
+        Write-Host "  Cert HTTPS: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+}
+
+function Show-Port80Bindings {
+    Write-Host '  --- Danh sach binding :80 (de soi request di vao site nao) ---' -ForegroundColor Cyan
+    Get-Website | ForEach-Object {
+        $siteName = $_.Name
+        $siteState = [string]$_.State
+        Get-WebBinding -Name $siteName -Protocol 'http' -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($_.bindingInformation -match ':80') {
+                Write-Host ("  [{0}] {1}  siteState={2}" -f $siteName, $_.bindingInformation, $siteState)
+            }
+        }
+    }
+}
+
 function Ensure-SiteWithBindings {
     param(
         [string]$SiteName,
@@ -253,39 +312,62 @@ function Ensure-SiteWithBindings {
     Set-DeployAcl -Path $PhysicalPath -AppPoolName $AppPoolName
 
     if (Test-IisSiteExists -Name $SiteName) {
-        Write-Host "  Site '$SiteName' da co - cap nhat physicalPath + AppPool." -ForegroundColor DarkGray
+        Write-Host "  Site '$SiteName' da co - cap nhat physicalPath + AppPool + binding." -ForegroundColor DarkGray
         Set-ItemProperty "IIS:\Sites\$SiteName" -Name physicalPath -Value $PhysicalPath
         Set-ItemProperty "IIS:\Sites\$SiteName" -Name applicationPool -Value $AppPoolName
-        Ensure-DefaultDocument -SiteName $SiteName
-        return
+    }
+    else {
+        Write-Host "  Tao site '$SiteName' -> $PhysicalPath"
+        # Tao site voi binding tam; sau do Ensure-SiteBindings se chuan hoa host header.
+        New-Website -Name $SiteName `
+            -PhysicalPath $PhysicalPath `
+            -ApplicationPool $AppPoolName `
+            -HostHeader $HostName `
+            -Port 80 `
+            -Force | Out-Null
     }
 
-    Write-Host "  Tao site '$SiteName' -> $PhysicalPath"
-    New-Website -Name $SiteName `
-        -PhysicalPath $PhysicalPath `
-        -ApplicationPool $AppPoolName `
-        -HostHeader $HostName `
-        -Port 80 `
-        -Force | Out-Null
-
-    $httpsBindingInfo = "*:443:$HostName"
-    $existingHttps = Get-WebBinding -Name $SiteName -Protocol 'https' -ErrorAction SilentlyContinue |
-        Where-Object { $_.bindingInformation -eq $httpsBindingInfo }
-    if (-not $existingHttps) {
-        Write-Host "  Them binding https://$HostName (SNI) voi cert '$($Certificate.FriendlyName)'..."
-        New-WebBinding -Name $SiteName -Protocol 'https' -Port 443 -HostHeader $HostName -SslFlags 1
-    }
-
-    $httpsBinding = Get-WebBinding -Name $SiteName -Protocol 'https' |
-        Where-Object { $_.bindingInformation -eq $httpsBindingInfo } |
-        Select-Object -First 1
-    if (-not $httpsBinding) {
-        throw "Khong lay duoc HTTPS binding cho site '$SiteName'."
-    }
-    $httpsBinding.AddSslCertificate($Certificate.Thumbprint, 'My')
-    Write-Host "  Da gan cert thumbprint $($Certificate.Thumbprint)" -ForegroundColor Green
+    Ensure-SiteBindings -SiteName $SiteName -HostName $HostName -Certificate $Certificate
     Ensure-DefaultDocument -SiteName $SiteName
+
+    Write-Host "  Bindings hien tai cua '$SiteName':"
+    Get-WebBinding -Name $SiteName | ForEach-Object {
+        Write-Host "    $($_.protocol) $($_.bindingInformation)"
+    }
 }
+
+function Test-LocalIisSmoke {
+    param(
+        [string]$HostName,
+        [string]$Path = '/',
+        [int]$Port = 80
+    )
+    try {
+        $url = "http://127.0.0.1:$Port$Path"
+        Write-Host "  Smoke $url (Host: $HostName) ..."
+        $resp = Invoke-WebRequest -Uri $url -Headers @{ Host = $HostName } -UseBasicParsing -TimeoutSec 20
+        Write-Host "  -> HTTP $($resp.StatusCode)" -ForegroundColor Green
+    }
+    catch {
+        $status = $null
+        if ($_.Exception.Response) {
+            $status = [int]$_.Exception.Response.StatusCode
+        }
+        Write-Host "  -> THAT BAI status=$status : $($_.Exception.Message)" -ForegroundColor Red
+        if ($status -eq 503) {
+            Write-Host '  503 local: thuong do request roi vao Default Web Site (pool Stopped),' -ForegroundColor Yellow
+            Write-Host '  hoac site dung thieu binding HostHeader. Xem binding :80 ben duoi:' -ForegroundColor Yellow
+            Show-Port80Bindings
+            $default = Get-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue
+            if ($default) {
+                $dp = Get-WebAppPoolState -Name $default.applicationPool -ErrorAction SilentlyContinue
+                Write-Host ("  Default Web Site state={0}, pool={1} ({2})" -f $default.State, $default.applicationPool, $(if ($dp) { $dp.Value } else { '?' }))
+            }
+        }
+        Write-Host "  Goi y: Event Viewer / $DeployRoot\api\logs\stdout_*.log" -ForegroundColor Yellow
+    }
+}
+
 
 function Publish-Backend {
     param(
@@ -407,28 +489,6 @@ Sau khi cai xong: iisreset
 "@
     }
     Write-Host "  AspNetCore Module V2: $found"
-}
-
-function Test-LocalIisSmoke {
-    param(
-        [string]$HostName,
-        [string]$Path = '/',
-        [int]$Port = 80
-    )
-    try {
-        $url = "http://127.0.0.1:$Port$Path"
-        Write-Host "  Smoke $url (Host: $HostName) ..."
-        $resp = Invoke-WebRequest -Uri $url -Headers @{ Host = $HostName } -UseBasicParsing -TimeoutSec 20
-        Write-Host "  -> HTTP $($resp.StatusCode)" -ForegroundColor Green
-    }
-    catch {
-        $status = $null
-        if ($_.Exception.Response) {
-            $status = [int]$_.Exception.Response.StatusCode
-        }
-        Write-Host "  -> THAT BAI status=$status : $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "  Goi y: xem Event Viewer / $DeployRoot\api\logs\stdout_*.log" -ForegroundColor Yellow
-    }
 }
 
 # -------------------- main --------------------
