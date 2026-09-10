@@ -17,15 +17,15 @@
   - Node.js LTS, .NET 8 SDK
 
   Chay (PowerShell Admin):
-    powershell -ExecutionPolicy Bypass -File .\scripts\release.ps1
+    powershell -ExecutionPolicy Bypass -File .\release.ps1
 
   Doi hostname neu domain khac anh DNS:
-    .\scripts\release.ps1 -ApiHostName 'gddb-thuong-tin-api.hndedu.vn' -UiHostName 'gddb-thuong-tin.hndedu.vn'
+    .\release.ps1 -ApiHostName 'gddb-thuong-tin-api.hndedu.vn' -UiHostName 'gddb-thuong-tin.hndedu.vn'
 #>
 
 [CmdletBinding()]
 param(
-    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path,
+    [string]$RepoRoot = $PSScriptRoot,
     [string]$DeployRoot = 'C:\inetpub\gddb-thuong-tin',
     [string]$ApiSiteName = 'GDDB_TT_API',
     [string]$UiSiteName = 'GDDB_TT_UI',
