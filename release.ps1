@@ -20,7 +20,7 @@
     powershell -ExecutionPolicy Bypass -File .\release.ps1
 
   Doi hostname neu domain khac anh DNS:
-    .\release.ps1 -ApiHostName 'gddb-thuong-tin-api.hndedu.vn' -UiHostName 'gddb-thuong-tin.hndedu.vn'
+    .\release.ps1 -ApiHostName 'gddb-thuong-tin-api.hndedu.com' -UiHostName 'gddb-thuong-tin.hndedu.com'
 #>
 
 [CmdletBinding()]
@@ -29,8 +29,8 @@ param(
     [string]$DeployRoot = 'C:\inetpub\gddb-thuong-tin',
     [string]$ApiSiteName = 'GDDB_TT_API',
     [string]$UiSiteName = 'GDDB_TT_UI',
-    [string]$ApiHostName = 'gddb-thuong-tin-api.hndedu.vn',
-    [string]$UiHostName = 'gddb-thuong-tin.hndedu.vn',
+    [string]$ApiHostName = 'gddb-thuong-tin-api.hndedu.com',
+    [string]$UiHostName = 'gddb-thuong-tin.hndedu.com',
     [string]$CertFriendlyName = 'hndedu-cloudflare-origin',
     [string]$DotnetConfiguration = 'Release',
     [ValidateSet('win-x64', 'win-x86')]
