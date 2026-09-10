@@ -42,12 +42,14 @@ builder.Services.AddSwaggerGen(c =>
 
 builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddAuthorization();
+var corsOrigins = builder.Configuration.GetSection("Cors:Origins").Get<string[]>() ?? [];
 builder.Services.AddCors(opt =>
 {
     opt.AddPolicy("frontend", p => p
         .SetIsOriginAllowed(origin =>
             origin.StartsWith("http://localhost:", StringComparison.OrdinalIgnoreCase)
-            || origin.StartsWith("http://127.0.0.1:", StringComparison.OrdinalIgnoreCase))
+            || origin.StartsWith("http://127.0.0.1:", StringComparison.OrdinalIgnoreCase)
+            || corsOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase))
         .AllowAnyHeader()
         .AllowAnyMethod());
 });
