@@ -306,6 +306,25 @@ function Publish-Backend {
     if ($LASTEXITCODE -ne 0) {
         throw "dotnet publish that bai (exit $LASTEXITCODE)."
     }
+
+    $exe = Join-Path $OutputPath 'Secms.Api.exe'
+    $dll = Join-Path $OutputPath 'Secms.Api.dll'
+    $webConfig = Join-Path $OutputPath 'web.config'
+    if (-not (Test-Path -LiteralPath $exe)) {
+        throw "Thieu Secms.Api.exe sau publish. IIS can apphost (.exe), khong chi .dll."
+    }
+    if (-not (Test-Path -LiteralPath $dll)) {
+        throw "Thieu Secms.Api.dll sau publish."
+    }
+    if (-not (Test-Path -LiteralPath $webConfig)) {
+        throw "Thieu web.config sau publish."
+    }
+    Write-Host "  OK: Secms.Api.exe + web.config"
+}
+
+function Test-UrlRewriteInstalled {
+    $dll = Join-Path $env:SystemRoot 'System32\inetsrv\rewrite.dll'
+    return (Test-Path -LiteralPath $dll)
 }
 
 function Publish-Frontend {
@@ -354,6 +373,61 @@ function Publish-Frontend {
         throw "robocopy that bai (exit $LASTEXITCODE)."
     }
     $global:LASTEXITCODE = 0
+
+    # Thieu URL Rewrite -> web.config co <rewrite> gay loi cau hinh site (thuong 500.19, co the keo 503).
+    $uiWebConfig = Join-Path $OutputPath 'web.config'
+    if ((Test-Path -LiteralPath $uiWebConfig) -and -not (Test-UrlRewriteInstalled)) {
+        Write-Host '  CANH BAO: chua cai URL Rewrite Module - go section rewrite trong web.config FE.' -ForegroundColor Yellow
+        [xml]$xml = Get-Content -LiteralPath $uiWebConfig -Raw
+        $rewrite = $xml.SelectSingleNode('//rewrite')
+        if ($rewrite -and $rewrite.ParentNode) {
+            [void]$rewrite.ParentNode.RemoveChild($rewrite)
+            $xml.Save($uiWebConfig)
+        }
+    }
+
+    if (-not (Test-Path (Join-Path $OutputPath 'index.html'))) {
+        throw "Thieu index.html trong thu muc UI deploy."
+    }
+}
+
+function Assert-AspNetCoreHostingBundle {
+    $candidates = @(
+        "${env:ProgramFiles}\IIS\Asp.Net Core Module\V2\aspnetcorev2.dll",
+        "${env:ProgramFiles(x86)}\IIS\Asp.Net Core Module\V2\aspnetcorev2.dll"
+    )
+    $found = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (-not $found) {
+        throw @"
+Chua cai ASP.NET Core Hosting Bundle (.NET 8).
+Native (`dotnet run`) van chay duoc, nhung IIS se 503/500.30.
+Tai: https://dotnet.microsoft.com/permalink/dotnetcore-current-windows-runtime-bundle-installer
+Sau khi cai xong: iisreset
+"@
+    }
+    Write-Host "  AspNetCore Module V2: $found"
+}
+
+function Test-LocalIisSmoke {
+    param(
+        [string]$HostName,
+        [string]$Path = '/',
+        [int]$Port = 80
+    )
+    try {
+        $url = "http://127.0.0.1:$Port$Path"
+        Write-Host "  Smoke $url (Host: $HostName) ..."
+        $resp = Invoke-WebRequest -Uri $url -Headers @{ Host = $HostName } -UseBasicParsing -TimeoutSec 20
+        Write-Host "  -> HTTP $($resp.StatusCode)" -ForegroundColor Green
+    }
+    catch {
+        $status = $null
+        if ($_.Exception.Response) {
+            $status = [int]$_.Exception.Response.StatusCode
+        }
+        Write-Host "  -> THAT BAI status=$status : $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  Goi y: xem Event Viewer / $DeployRoot\api\logs\stdout_*.log" -ForegroundColor Yellow
+    }
 }
 
 # -------------------- main --------------------
@@ -365,6 +439,11 @@ Write-Host "API:    $ApiHostName  (site $ApiSiteName)"
 Write-Host "UI:     $UiHostName   (site $UiSiteName)"
 
 Ensure-WebAdministration
+Assert-AspNetCoreHostingBundle
+if (-not (Test-UrlRewriteInstalled)) {
+    Write-Host 'CANH BAO: URL Rewrite Module chua cai - SPA deep-link co the 404 (trang chu van mo duoc).' -ForegroundColor Yellow
+    Write-Host '  Tai: https://www.iis.net/downloads/microsoft/url-rewrite' -ForegroundColor Yellow
+}
 
 $apiProject = Join-Path $RepoRoot 'src\backend\Secms.Api\Secms.Api.csproj'
 $frontendDir = Join-Path $RepoRoot 'src\frontend'
@@ -400,12 +479,16 @@ Ensure-SiteWithBindings `
     -Certificate $cert `
     -ManagedRuntimeVersion 'NoManagedCode'
 
-Write-Step '4/4 Mo lai site IIS'
+Write-Step '4/4 Mo lai site IIS + smoke local'
 Start-IisSiteSafe -Name $ApiSiteName
 Start-IisSiteSafe -Name $UiSiteName
+Start-Sleep -Seconds 2
+Test-LocalIisSmoke -HostName $UiHostName -Path '/'
+Test-LocalIisSmoke -HostName $ApiHostName -Path '/swagger/index.html'
 
 $elapsed = (Get-Date) - $startedAt
 Write-Host ''
 Write-Host "Hoan tat trong $([int]$elapsed.TotalSeconds)s." -ForegroundColor Green
 Write-Host "  API: https://$ApiHostName/swagger"
 Write-Host "  UI:  https://$UiHostName/"
+Write-Host "  Neu local smoke OK ma domain van 503: kiem tra Cloudflare (SSL Full, proxy orange cloud, IP origin)."

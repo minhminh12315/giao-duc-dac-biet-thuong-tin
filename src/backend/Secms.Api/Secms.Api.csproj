@@ -6,6 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <!-- Giữ nguyên web.config tùy chỉnh (WebDAV/PUT/PATCH/DELETE) khi publish -->
     <IsTransformWebConfigDisabled>true</IsTransformWebConfigDisabled>
+    <UseAppHost>true</UseAppHost>
   </PropertyGroup>
 
   <ItemGroup>
