@@ -25,7 +25,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$RepoRoot = $PSScriptRoot,
+    [string]$RepoRoot = '',
     [string]$DeployRoot = 'C:\inetpub\gddb-thuong-tin',
     [string]$ApiSiteName = 'GDDB_TT_API',
     [string]$UiSiteName = 'GDDB_TT_UI',
@@ -39,6 +39,29 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# PSScriptRoot co the rong neu script khong chay bang -File / bi goi qua runner.
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+        $RepoRoot = $PSScriptRoot
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($PSCommandPath)) {
+        $RepoRoot = Split-Path -Parent -Path $PSCommandPath
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($MyInvocation.MyCommand.Path)) {
+        $RepoRoot = Split-Path -Parent -Path $MyInvocation.MyCommand.Path
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($MyInvocation.MyCommand.Definition)) {
+        $def = $MyInvocation.MyCommand.Definition
+        if (Test-Path -LiteralPath $def) {
+            $RepoRoot = Split-Path -Parent -Path $def
+        }
+    }
+}
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    $RepoRoot = (Get-Location).Path
+}
+$RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 
 function Write-Step {
     param([string]$Message)
